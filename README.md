@@ -1,0 +1,1 @@
+# Ultralytics AI — Python Package Assets\n\nPrebuilt Python 3.13 wheel packages for the Ultralytics AI Android app.\n\nPackages are organized as `packages/{abi}/{package}.tar.gz`\n\nSupported ABIs:\n- `arm64-v8a`\n- `armeabi-v7a`\n- `x86_64`
