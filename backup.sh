@@ -1,174 +1,210 @@
-#!/data/data/com.termux/files/usr/bin/sh
+#!/data/data/com.termux/files/usr/bin/bash
+# =============================================================================
+#  backup.sh — Ultralytics AI · Termux Migration Backup
+#  Backs up $HOME and $PREFIX to external / internal storage before
+#  switching to the custom-signed Termux build.
+# =============================================================================
+set -euo pipefail
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+RED='\033[1;31m'; YLW='\033[1;33m'; GRN='\033[1;32m'; CYN='\033[1;36m'
+BLD='\033[1m'; RST='\033[0m'
+
+info()    { printf "${CYN}  →${RST}  %s\n" "$*"; }
+success() { printf "${GRN}  ✓${RST}  %s\n" "$*"; }
+warn()    { printf "${YLW}  ⚠${RST}  %s\n" "$*"; }
+error()   { printf "${RED}  ✗${RST}  %s\n" "$*" >&2; }
+die()     { error "$*"; exit 1; }
+
+banner() {
+    printf "\n${YLW}"
+    printf '══════════════════════════════════════════════════════\n'
+    printf '   ULTRALYTICS AI  ·  Termux Migration Backup Tool   \n'
+    printf '══════════════════════════════════════════════════════\n'
+    printf "${RST}\n"
+}
+
+# ── Cleanup trap ──────────────────────────────────────────────────────────────
+BACKUP_PATH=""
+cleanup() {
+    local code=$?
+    if [[ $code -ne 0 && -n "$BACKUP_PATH" && -f "$BACKUP_PATH" ]]; then
+        warn "Removing incomplete backup file…"
+        rm -f "$BACKUP_PATH"
+    fi
+}
+trap cleanup EXIT
+
+# ── Banner & confirmation ─────────────────────────────────────────────────────
 clear
-echo -e "\033[1;33m====================================================\033[0m"
-echo -e "\033[1;33m       ULTRALYTICS AI - TERMUX MIGRATION BACKUP     \033[0m"
-echo -e "\033[1;33m====================================================\033[0m"
-echo ""
-echo -e "\033[1;31mWARNING:\033[0m You are about to backup your Termux environment."
-echo "This backup is needed because we must reinstall Termux to match"
-echo "the certificate signature of the Ultralytics AI app."
-echo ""
-echo -n "Do you want to proceed with the backup? (y/n): "
-read -r answer
-if [ "$answer" != "${answer#[Yy]}" ]; then
-    echo "Starting backup process..."
-else
-    echo "Backup cancelled."
-    exit 0
-fi
+banner
 
-# 1. Scan for storage devices
+printf "${BLD}This script backs up your Termux environment (\$HOME + \$PREFIX).\n"
+printf "Required so you can reinstall the custom-signed Termux build\n"
+printf "that is compatible with Ultralytics AI's Unix socket bridge.${RST}\n\n"
+
+printf "${RED}${BLD}WARNING:${RST} All files inside Termux will be archived.\n"
+printf "The backup may take several minutes on large environments.\n\n"
+
+read -rp "Proceed with backup? [y/N]: " answer
+[[ "${answer,,}" == y* ]] || { info "Backup cancelled."; exit 0; }
+
+# ── 1. Discover storage roots ─────────────────────────────────────────────────
 echo ""
-echo "Scanning for storage devices..."
+info "Scanning for available storage devices…"
+
 devices=()
-device_names=()
-default_idx=0
+labels=()
 
-# Internal storage
-if [ -d "/storage/emulated/0" ]; then
+if [[ -d /storage/emulated/0 ]]; then
     devices+=("/storage/emulated/0")
-    device_names+=("Internal Storage (/storage/emulated/0)")
+    labels+=("Internal Storage  (/storage/emulated/0)")
 fi
 
-# External storage devices
-for dir in /storage/*; do
-    if [ -d "$dir" ] && [ "$dir" != "/storage/self" ] && [ "$dir" != "/storage/emulated" ]; then
-        devices+=("$dir")
-        device_names+=("External SD Card / Storage (${dir##*/})")
-        default_idx=$(( ${#devices[@]} - 1 ))
-    fi
-done
+while IFS= read -r -d '' dir; do
+    name="${dir##*/}"
+    [[ "$name" == "self" || "$name" == "emulated" ]] && continue
+    devices+=("$dir")
+    labels+=("External Storage  (${name})")
+done < <(find /storage -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
 
-if [ ${#devices[@]} -eq 0 ]; then
-    echo -e "\033[1;31mError:\033[0m No writeable storage devices found in /storage."
-    echo "Please run 'termux-setup-storage' first to grant storage access."
-    exit 1
+if [[ ${#devices[@]} -eq 0 ]]; then
+    die "No writable storage found.\nRun 'termux-setup-storage' first to grant storage access."
 fi
 
-echo "Available storage devices:"
-for i in "${!device_names[@]}"; do
-    if [ "$i" -eq "$default_idx" ]; then
-        echo -e "  [$i] \033[1;32m${device_names[$i]} [Default]\033[0m"
-    else
-        echo "  [$i] ${device_names[$i]}"
-    fi
-done
-
-echo -n "Select backup device (press Enter for default): "
-read -r sel
-if [ -z "$sel" ]; then
-    sel=$default_idx
-fi
-
-target_device="${devices[$sel]}"
-if [ -z "$target_device" ]; then
-    echo "Invalid selection."
-    exit 1
-fi
-
-backup_dir="$target_device/.tmp"
-mkdir -p "$backup_dir"
-backup_path="$backup_dir/backup.tar.gz"
+# ── 2. Device selection ───────────────────────────────────────────────────────
+default_idx=$(( ${#devices[@]} - 1 ))   # prefer last (most likely SD card)
 
 echo ""
-echo "Backup location: $backup_path"
+printf "${BLD}Available storage devices:${RST}\n"
+for i in "${!labels[@]}"; do
+    if [[ $i -eq $default_idx ]]; then
+        printf "  ${GRN}[%d]${RST} %s ${GRN}[default]${RST}\n" "$i" "${labels[$i]}"
+    else
+        printf "  [%d] %s\n" "$i" "${labels[$i]}"
+    fi
+done
+echo ""
 
-# 2. Check storage space
-echo "Calculating space requirements..."
-size_home=$(du -sk "$HOME" 2>/dev/null | cut -f1)
-size_prefix=$(du -sk "$PREFIX" 2>/dev/null | cut -f1)
-total_needed_kb=$((size_home + size_prefix))
-total_needed_mb=$((total_needed_kb / 1024))
+read -rp "Select device number [${default_idx}]: " sel
+sel="${sel:-$default_idx}"
 
-avail_kb=$(df -P -k "$target_device" | tail -n 1 | awk '{print $4}')
-avail_mb=$((avail_kb / 1024))
-
-echo "Space required: ~${total_needed_mb} MB"
-echo "Space available: ${avail_mb} MB"
-
-if [ "$total_needed_kb" -gt "$avail_kb" ]; then
-    echo -e "\033[1;31m========================================\033[0m"
-    echo -e "\033[1;31m             BACKUP FAILED              \033[0m"
-    echo -e "\033[1;31m========================================\033[0m"
-    echo "Reason: Insufficient storage space on the selected device."
-    echo "Available space: ${avail_mb} MB"
-    echo "Needed space: ~${total_needed_mb} MB"
-    echo "Please free up at least $((total_needed_mb - avail_mb)) MB on the device and try again."
-    exit 1
+if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ $sel -ge ${#devices[@]} ]]; then
+    die "Invalid selection: '$sel'"
 fi
 
-# 3. Perform Backup
-echo "Starting backup of HOME ($HOME) and PREFIX ($PREFIX)..."
+target="${devices[$sel]}"
+backup_dir="${target}/.tmp"
+BACKUP_PATH="${backup_dir}/termux_backup.tar.gz"
 
+mkdir -p "$backup_dir" || die "Cannot create backup directory: $backup_dir"
+echo ""
+info "Backup will be saved to: ${BLD}${BACKUP_PATH}${RST}"
+
+# ── 3. Space check ────────────────────────────────────────────────────────────
+info "Calculating space requirements…"
+
+size_home_kb=$(du -sk "$HOME"   2>/dev/null | cut -f1 || echo 0)
+size_pfx_kb=$(du -sk  "$PREFIX" 2>/dev/null | cut -f1 || echo 0)
+total_kb=$(( size_home_kb + size_pfx_kb ))
+total_mb=$(( total_kb / 1024 ))
+
+avail_kb=$(df -Pk "$target" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
+avail_mb=$(( avail_kb / 1024 ))
+
+printf "  Space needed  : ~%d MB\n" "$total_mb"
+printf "  Space available: %d MB\n\n" "$avail_mb"
+
+if (( total_kb > avail_kb )); then
+    short=$(( total_mb - avail_mb ))
+    die "Not enough space! Please free at least ${short} MB on the selected device."
+fi
+
+# ── 4. Install pv for progress (optional) ────────────────────────────────────
 use_pv=false
-if ! command -v pv >/dev/null 2>&1; then
-    echo "Attempting to install 'pv' to show real-time progress..."
-    pkg install -y pv >/dev/null 2>&1 || apt install -y pv >/dev/null 2>&1
+if ! command -v pv &>/dev/null; then
+    info "Installing 'pv' for real-time progress display…"
+    pkg install -y pv &>/dev/null || true
 fi
+command -v pv &>/dev/null && use_pv=true
 
-if command -v pv >/dev/null 2>&1; then
-    use_pv=true
-fi
+# ── 5. Perform backup ─────────────────────────────────────────────────────────
+info "Starting backup of Termux environment…"
+echo ""
 
-cd / || exit 1
-rel_home="data/data/com.termux/files/home"
-rel_prefix="data/data/com.termux/files/usr"
+REL_HOME="data/data/com.termux/files/home"
+REL_PFX="data/data/com.termux/files/usr"
 
-if [ "$use_pv" = true ]; then
-    tar -cf - "$rel_home" "$rel_prefix" 2>/dev/null | pv -s "${total_needed_kb}k" | gzip > "$backup_path"
+cd /
+
+if [[ "$use_pv" == true ]]; then
+    tar -cf - "$REL_HOME" "$REL_PFX" 2>/dev/null \
+        | pv -s "${total_kb}k" -N "Archiving" \
+        | gzip -6 > "$BACKUP_PATH"
 else
-    est_compressed_kb=$((total_needed_kb * 4 / 10))
-    if [ $est_compressed_kb -le 0 ]; then est_compressed_kb=1; fi
-    
-    tar -czf "$backup_path" "$rel_home" "$rel_prefix" >/dev/null 2>&1 &
+    # Estimate compressed size (~40 % of raw)
+    est_kb=$(( total_kb * 4 / 10 ))
+    (( est_kb < 1 )) && est_kb=1
+
+    tar -czf "$BACKUP_PATH" "$REL_HOME" "$REL_PFX" &>/dev/null &
     tar_pid=$!
-    
-    start_time=$(date +%s)
-    last_size=0
-    last_time=$start_time
-    
-    while kill -0 $tar_pid 2>/dev/null; do
+
+    last_kb=0
+    last_ts=$(date +%s)
+    BAR_WIDTH=30
+
+    while kill -0 "$tar_pid" 2>/dev/null; do
         sleep 1
-        current_time=$(date +%s)
-        if [ -f "$backup_path" ]; then
-            current_size_bytes=$(wc -c < "$backup_path" 2>/dev/null || stat -c %s "$backup_path" 2>/dev/null || echo 0)
+        now=$(date +%s)
+
+        cur_bytes=0
+        [[ -f "$BACKUP_PATH" ]] && cur_bytes=$(stat -c %s "$BACKUP_PATH" 2>/dev/null || echo 0)
+        cur_kb=$(( cur_bytes / 1024 ))
+
+        pct=$(( cur_kb * 100 / est_kb ))
+        (( pct > 99 )) && pct=99
+
+        dt=$(( now - last_ts ))
+        (( dt < 1 )) && dt=1
+        speed_kb=$(( (cur_kb - last_kb) / dt ))
+
+        filled=$(( pct * BAR_WIDTH / 100 ))
+        bar=""
+        for (( b=0; b<BAR_WIDTH; b++ )); do
+            if (( b < filled )); then bar+="█"
+            else bar+="░"
+            fi
+        done
+
+        if (( speed_kb >= 1024 )); then
+            spd_str="$(( speed_kb / 1024 )) MB/s"
         else
-            current_size_bytes=0
+            spd_str="${speed_kb} KB/s"
         fi
-        current_size_kb=$((current_size_bytes / 1024))
-        
-        pct=$((current_size_kb * 100 / est_compressed_kb))
-        if [ $pct -gt 99 ]; then pct=99; fi
-        
-        time_diff=$((current_time - last_time))
-        if [ $time_diff -le 0 ]; then time_diff=1; fi
-        size_diff=$((current_size_kb - last_size))
-        speed_kb_s=$((size_diff / time_diff))
-        
-        num_chars=$((pct / 4))
-        bar=$(head -c $num_chars < /dev/zero | tr '\0' '#')
-        
-        if [ $speed_kb_s -ge 1024 ]; then
-            speed_str="$((speed_kb_s / 1024)) MB/s"
-        else
-            speed_str="${speed_kb_s} KB/s"
-        fi
-        
-        printf "\rProgress: [%-25s] %d%% | Speed: %s" "$bar" "$pct" "$speed_str"
-        
-        last_size=$current_size_kb
-        last_time=$current_time
+
+        printf "\r  ${CYN}[%s]${RST} %3d%% │ %s" "$bar" "$pct" "$spd_str"
+
+        last_kb=$cur_kb
+        last_ts=$now
     done
-    wait $tar_pid
-    printf "\rProgress: [%-25s] 100%% | Done!               \n" "#########################"
+
+    wait "$tar_pid"
+    printf "\r  ${GRN}[%s]${RST} 100%% │ Done!%30s\n" \
+        "$(printf '█%.0s' $(seq 1 $BAR_WIDTH))" ""
 fi
 
-if [ -f "$backup_path" ] && [ -s "$backup_path" ]; then
-    echo ""
-    echo -e "\033[1;32mBackup successfully saved to: $backup_path\033[0m"
-    echo "You can now uninstall this Termux app and install the signed version."
-else
-    echo ""
-    echo -e "\033[1;31mBackup failed to write file.\033[0m"
-    exit 1
+# ── 6. Verify & report ────────────────────────────────────────────────────────
+echo ""
+if [[ ! -s "$BACKUP_PATH" ]]; then
+    die "Backup file is empty or missing — something went wrong."
 fi
+
+final_mb=$(( $(stat -c %s "$BACKUP_PATH") / 1024 / 1024 ))
+success "Backup complete!"
+printf "\n  ${BLD}File   :${RST} %s\n" "$BACKUP_PATH"
+printf   "  ${BLD}Size   :${RST} %d MB\n\n" "$final_mb"
+
+printf "${YLW}Next steps:${RST}\n"
+printf "  1. Uninstall Termux (and Termux:X11) from your device.\n"
+printf "  2. Install the signed builds provided by Ultralytics AI.\n"
+printf "  3. Run ${BLD}restore.sh${RST} inside the new Termux to restore your data.\n\n"
