@@ -7,8 +7,8 @@
 set -euo pipefail
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
-RED='\033[1;31m'; YLW='\033[1;33m'; GRN='\033[1;32m'; CYN='\033[1;36m'
-BLD='\033[1m'; RST='\033[0m'
+RED=$'\033[1;31m'; YLW=$'\033[1;33m'; GRN=$'\033[1;32m'; CYN=$'\033[1;36m'
+BLD=$'\033[1m';  RST=$'\033[0m';  DIM=$'\033[2m'
 
 info()    { printf "${CYN}  →${RST}  %s\n" "$*"; }
 success() { printf "${GRN}  ✓${RST}  %s\n" "$*"; }
@@ -85,7 +85,7 @@ fi
 # Thresholds (KB):
 MIN_KB=524288      # 512 MB  — hard block, unusable
 WARN_KB=2097152    # 2 GB    — yellow caution
-DIM='\033[2m'
+# (DIM already defined above)
 
 # Default = device with most free space
 default_idx=0
@@ -152,8 +152,7 @@ avail_kb=${avail_kbs[$sel]}
 avail_mb=$(( avail_kb / 1024 ))
 echo ""
 info "Backup will be saved to: ${BLD}${BACKUP_PATH}${RST}"
-printf "  Space needed   : ~%d MB\n" "$total_mb"
-printf "  Space available:  %d MB\n\n" "$avail_mb"
+printf "  Space available on device: %d MB\n\n" "$avail_mb"
 
 # ── 4. Install pv for progress (optional) ────────────────────────────────────
 use_pv=false
@@ -174,11 +173,11 @@ cd /
 
 if [[ "$use_pv" == true ]]; then
     tar -cf - "$REL_HOME" "$REL_PFX" 2>/dev/null \
-        | pv -s "${total_kb}k" -N "Archiving" \
+        | pv -N "Archiving" \
         | gzip -6 > "$BACKUP_PATH"
 else
-    # Estimate compressed size (~40 % of raw)
-    est_kb=$(( total_kb * 4 / 10 ))
+    # Track progress by watching the growing output file size
+    est_kb=$(( avail_kb / 2 ))   # use half of available space as upper bound
     (( est_kb < 1 )) && est_kb=1
 
     tar -czf "$BACKUP_PATH" "$REL_HOME" "$REL_PFX" &>/dev/null &
