@@ -49,16 +49,33 @@ printf "The backup may take several minutes on large environments.\n\n"
 read -rp "Proceed with backup? [y/N]: " answer
 [[ "${answer,,}" == y* ]] || { info "Backup cancelled."; exit 0; }
 
-# ── 1. Pre-calculate backup size first ───────────────────────────────────────
+# ── 1. Pre-calculate backup size (instant — no du tree walk) ─────────────────
 echo ""
-info "Calculating backup size (scanning \$HOME + \$PREFIX)…"
+info "Estimating backup size…"
 
-size_home_kb=$(du -sk "$HOME"   2>/dev/null | cut -f1 || echo 0)
-size_pfx_kb=$(du -sk  "$PREFIX" 2>/dev/null | cut -f1 || echo 0)
-total_kb=$(( size_home_kb + size_pfx_kb ))
+# Read used-block counts directly from the filesystem via df — zero file I/O,
+# no memory spike, no risk of OOM kill that du -sk causes on large envs.
+#
+# /data/data/com.termux is on the same partition as $HOME and $PREFIX,
+# so 'df /data' gives us the used+free blocks we need.
+#
+# We take the USED blocks of the data partition and subtract what was there
+# before Termux, but that's complex. Instead we use a safe upper bound:
+# total used space on the data partition as worst-case backup size estimate.
+_df_kb() { df -Pk "$1" 2>/dev/null | awk 'NR==2{print $3}' || echo 0; }
+
+data_used_kb=$(_df_kb "/data/data/com.termux/files")
+# Fallback: if the path isn't accessible, estimate from $PREFIX itself via stat
+if [[ "$data_used_kb" -eq 0 ]]; then
+    data_used_kb=$(_df_kb "$PREFIX")
+fi
+# Guard against empty/non-numeric result
+[[ "$data_used_kb" =~ ^[0-9]+$ ]] || data_used_kb=524288  # 512 MB safe default
+
+total_kb=$data_used_kb
 total_mb=$(( total_kb / 1024 ))
 
-printf "  Backup size needed : ${BLD}~%d MB${RST}\n" "$total_mb"
+printf "  Estimated backup size : ${BLD}~%d MB${RST}  (upper bound — actual archive will be smaller)\n" "$total_mb"
 
 # ── 2. Discover storage roots ─────────────────────────────────────────────────
 echo ""
