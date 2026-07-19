@@ -49,33 +49,35 @@ printf "The backup may take several minutes on large environments.\n\n"
 read -rp "Proceed with backup? [y/N]: " answer
 [[ "${answer,,}" == y* ]] || { info "Backup cancelled."; exit 0; }
 
-# ── 1. Pre-calculate backup size (instant — no du tree walk) ─────────────────
+# ── 1. Estimate backup size (OOM-safe) ───────────────────────────────────────
 echo ""
 info "Estimating backup size…"
 
-# Read used-block counts directly from the filesystem via df — zero file I/O,
-# no memory spike, no risk of OOM kill that du -sk causes on large envs.
-#
-# /data/data/com.termux is on the same partition as $HOME and $PREFIX,
-# so 'df /data' gives us the used+free blocks we need.
-#
-# We take the USED blocks of the data partition and subtract what was there
-# before Termux, but that's complex. Instead we use a safe upper bound:
-# total used space on the data partition as worst-case backup size estimate.
-_df_kb() { df -Pk "$1" 2>/dev/null | awk 'NR==2{print $3}' || echo 0; }
-
-data_used_kb=$(_df_kb "/data/data/com.termux/files")
-# Fallback: if the path isn't accessible, estimate from $PREFIX itself via stat
-if [[ "$data_used_kb" -eq 0 ]]; then
-    data_used_kb=$(_df_kb "$PREFIX")
+# du -sk walks every inode and can spike RAM enough for Android's LMK to kill
+# Termux on large installs. We cap it with a hard timeout. If du finishes in
+# time, we get an accurate number; if it's killed by timeout (very large env),
+# we warn the user and continue with a conservative placeholder.
+total_kb=0
+if command -v timeout &>/dev/null; then
+    total_kb=$(timeout 10 du -sk "$HOME" "$PREFIX" 2>/dev/null \
+        | awk '{s+=$1} END{print s+0}') || true
 fi
-# Guard against empty/non-numeric result
-[[ "$data_used_kb" =~ ^[0-9]+$ ]] || data_used_kb=524288  # 512 MB safe default
 
-total_kb=$data_used_kb
-total_mb=$(( total_kb / 1024 ))
+# Validate — empty / non-numeric / zero means du timed out or failed
+if ! [[ "$total_kb" =~ ^[0-9]+$ ]] || [[ $total_kb -eq 0 ]]; then
+    total_kb=0
+fi
 
-printf "  Estimated backup size : ${BLD}~%d MB${RST}  (upper bound — actual archive will be smaller)\n" "$total_mb"
+if [[ $total_kb -eq 0 ]]; then
+    warn "Termux environment is too large to measure quickly."
+    warn "Ensure the backup destination has at least 20 GB free."
+    total_kb=20971520   # 20 GB conservative placeholder for space checks
+    total_mb=20480
+    printf "  Estimated backup size : ${YLW}${BLD}~20+ GB${RST}  (could not measure exactly)\n"
+else
+    total_mb=$(( total_kb / 1024 ))
+    printf "  Estimated backup size : ${BLD}~%d MB${RST}\n" "$total_mb"
+fi
 
 # ── 2. Discover storage roots ─────────────────────────────────────────────────
 echo ""
