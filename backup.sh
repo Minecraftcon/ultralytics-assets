@@ -158,7 +158,7 @@ printf "  Space available on device: %d MB\n\n" "$avail_mb"
 use_pv=false
 if ! command -v pv &>/dev/null; then
     info "Installing 'pv' for real-time progress display…"
-    pkg install -y pv &>/dev/null || true
+    apt install -y pv &>/dev/null || true
 fi
 command -v pv &>/dev/null && use_pv=true
 
