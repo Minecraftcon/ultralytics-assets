@@ -49,58 +49,22 @@ printf "The backup may take several minutes on large environments.\n\n"
 read -rp "Proceed with backup? [y/N]: " answer
 [[ "${answer,,}" == y* ]] || { info "Backup cancelled."; exit 0; }
 
-# ── 1. Estimate backup size (OOM-safe) ───────────────────────────────────────
-echo ""
-info "Estimating backup size…"
-
-# du -sk walks every inode and can spike RAM enough for Android's LMK to kill
-# Termux on large installs. We cap it with a hard timeout. If du finishes in
-# time, we get an accurate number; if it's killed by timeout (very large env),
-# we warn the user and continue with a conservative placeholder.
-total_kb=0
-if command -v timeout &>/dev/null; then
-    total_kb=$(timeout 10 du -sk "$HOME" "$PREFIX" 2>/dev/null \
-        | awk '{s+=$1} END{print s+0}') || true
-fi
-
-# Validate — empty / non-numeric / zero means du timed out or failed
-if ! [[ "$total_kb" =~ ^[0-9]+$ ]] || [[ $total_kb -eq 0 ]]; then
-    total_kb=0
-fi
-
-if [[ $total_kb -eq 0 ]]; then
-    warn "Termux environment is too large to measure quickly."
-    warn "Ensure the backup destination has at least 20 GB free."
-    total_kb=20971520   # 20 GB conservative placeholder for space checks
-    total_mb=20480
-    printf "  Estimated backup size : ${YLW}${BLD}~20+ GB${RST}  (could not measure exactly)\n"
-else
-    total_mb=$(( total_kb / 1024 ))
-    printf "  Estimated backup size : ${BLD}~%d MB${RST}\n" "$total_mb"
-fi
-
-# ── 2. Discover storage roots ─────────────────────────────────────────────────
+# ── 1. Discover storage devices ──────────────────────────────────────────────
 echo ""
 info "Scanning for available storage devices…"
 
 devices=()
 labels=()
-avail_kbs=()    # parallel array: free KB per device
-has_space=()    # parallel array: 1=enough, 0=too small
+avail_kbs=()   # free KB per device
 
 _add_device() {
-    local path="$1" label="$2"
-    local free_kb free_mb
-    free_kb=$(df -Pk "$path" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
-    free_mb=$(( free_kb / 1024 ))
+    local path="$1" label="$2" free_kb
+    free_kb=$(df -Pk "$path" 2>/dev/null | awk 'NR==2{print $4}')
+    # Guard: must be a non-empty integer
+    [[ "$free_kb" =~ ^[0-9]+$ ]] || free_kb=0
     devices+=("$path")
     labels+=("$label")
     avail_kbs+=("$free_kb")
-    if (( free_kb >= total_kb )); then
-        has_space+=(1)
-    else
-        has_space+=(0)
-    fi
 }
 
 if [[ -d /storage/emulated/0 ]]; then
@@ -117,35 +81,44 @@ if [[ ${#devices[@]} -eq 0 ]]; then
     die "No writable storage found. Run 'termux-setup-storage' first."
 fi
 
-# ── 3. Device selection with free-space display ───────────────────────────────
-DIM='\033[2m'; STR='\033[9m'   # dim, strikethrough (widely supported)
+# ── 2. Device selection ───────────────────────────────────────────────────────
+# Thresholds (KB):
+MIN_KB=524288      # 512 MB  — hard block, unusable
+WARN_KB=2097152    # 2 GB    — yellow caution
+DIM='\033[2m'
 
-# Pick the first device with enough space as the default
+# Default = device with most free space
 default_idx=0
+best_kb=0
 for i in "${!devices[@]}"; do
-    [[ ${has_space[$i]} -eq 1 ]] && { default_idx=$i; break; }
+    if (( avail_kbs[i] > best_kb )); then
+        best_kb=${avail_kbs[i]}
+        default_idx=$i
+    fi
 done
 
 echo ""
-printf "${BLD}Available storage devices:${RST}  (need ~%d MB)\n" "$total_mb"
+printf "${BLD}Available storage devices:${RST}\n"
 echo ""
 
 for i in "${!devices[@]}"; do
     free_kb=${avail_kbs[$i]}
     free_mb=$(( free_kb / 1024 ))
     label="${labels[$i]}"
-    path="${devices[$i]}"
 
-    if [[ ${has_space[$i]} -eq 0 ]]; then
-        # Not enough space — show dimmed with ✗ and how much is short
-        short=$(( total_mb - free_mb ))
-        printf "  ${DIM}${RED}[%d]${RST}${DIM} %-35s  %4d MB free  ${RED}✗ need %d MB more${RST}\n" \
-            "$i" "$label" "$free_mb" "$short"
+    if (( free_kb < MIN_KB )); then
+        # Hard block — not enough for any meaningful backup
+        printf "  ${DIM}${RED}[%d]${RST}${DIM} %-35s  %6d MB free  ${RED}✗ too little space${RST}\n" \
+            "$i" "$label" "$free_mb"
+    elif (( free_kb < WARN_KB )); then
+        # Caution — might be enough, might not
+        printf "  ${YLW}[%d]${RST} %-35s  ${YLW}%6d MB free  ⚠ low${RST}\n" \
+            "$i" "$label" "$free_mb"
     elif [[ $i -eq $default_idx ]]; then
-        printf "  ${GRN}[%d]${RST} %-35s  ${GRN}%4d MB free${RST}  ${GRN}✓ default${RST}\n" \
+        printf "  ${GRN}[%d]${RST} %-35s  ${GRN}%6d MB free  ✓ default${RST}\n" \
             "$i" "$label" "$free_mb"
     else
-        printf "  ${CYN}[%d]${RST} %-35s  ${GRN}%4d MB free${RST}  ✓\n" \
+        printf "  ${CYN}[%d]${RST} %-35s  ${GRN}%6d MB free  ✓${RST}\n" \
             "$i" "$label" "$free_mb"
     fi
 done
@@ -154,14 +127,20 @@ echo ""
 read -rp "Select device number [${default_idx}]: " sel
 sel="${sel:-$default_idx}"
 
-if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ $sel -ge ${#devices[@]} ]]; then
+if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel >= ${#devices[@]} )); then
     die "Invalid selection: '${sel}'"
 fi
 
-if [[ ${has_space[$sel]} -eq 0 ]]; then
-    free_mb=$(( avail_kbs[$sel] / 1024 ))
-    short=$(( total_mb - free_mb ))
-    die "Device [${sel}] does not have enough free space (need ~${total_mb} MB, have ${free_mb} MB).\nFree at least ${short} MB and try again."
+if (( avail_kbs[sel] < MIN_KB )); then
+    free_mb=$(( avail_kbs[sel] / 1024 ))
+    die "Device [${sel}] has only ${free_mb} MB free — not enough for a backup.\nFree space or choose another device."
+fi
+
+if (( avail_kbs[sel] < WARN_KB )); then
+    free_mb=$(( avail_kbs[sel] / 1024 ))
+    warn "Only ${free_mb} MB free on selected device — backup may fail if Termux data is larger."
+    read -rp "Continue anyway? [y/N]: " cont
+    [[ "${cont,,}" == y* ]] || { info "Backup cancelled."; exit 0; }
 fi
 
 target="${devices[$sel]}"
