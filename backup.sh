@@ -148,7 +148,7 @@ backup_dir="${target}/.tmp"
 BACKUP_PATH="${backup_dir}/termux_backup.tar.gz"
 
 mkdir -p "$backup_dir" || die "Cannot create backup directory: $backup_dir"
-avail_kb=${avail_kbs[$sel]}
+avail_kb=${avail_kbs[$sel]:-0}
 avail_mb=$(( avail_kb / 1024 ))
 echo ""
 info "Backup will be saved to: ${BLD}${BACKUP_PATH}${RST}"
@@ -177,15 +177,15 @@ if [[ "$use_pv" == true ]]; then
         | gzip -6 > "$BACKUP_PATH"
 else
     # Track progress by watching the growing output file size
-    est_kb=$(( avail_kb / 2 ))   # use half of available space as upper bound
+    est_kb=$(( avail_kb / 2 ))
     (( est_kb < 1 )) && est_kb=1
-
-    tar -czf "$BACKUP_PATH" "$REL_HOME" "$REL_PFX" &>/dev/null &
-    tar_pid=$!
 
     last_kb=0
     last_ts=$(date +%s)
     BAR_WIDTH=30
+
+    tar -czf "$BACKUP_PATH" "$REL_HOME" "$REL_PFX" &>/dev/null &
+    tar_pid=$!
 
     while kill -0 "$tar_pid" 2>/dev/null; do
         sleep 1
@@ -224,7 +224,7 @@ else
 
     wait "$tar_pid"
     printf "\r  ${GRN}[%s]${RST} 100%% │ Done!%30s\n" \
-        "$(printf '█%.0s' $(seq 1 $BAR_WIDTH))" ""
+        "$(printf '█%.0s' $(seq 1 "$BAR_WIDTH"))" ""
 fi
 
 # ── 6. Verify & report ────────────────────────────────────────────────────────
